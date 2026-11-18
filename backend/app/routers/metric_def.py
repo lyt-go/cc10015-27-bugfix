@@ -65,6 +65,17 @@ def export_entries(
         headers={"Content-Disposition": 'attachment; filename="metric_def.csv"'})
 
 
+@router.get("/factor_layer_check")
+def factor_layer_check(
+    version: str = Query(default="V027", description="口径版本，如 V027"),
+) -> dict:
+    """跨模块联动：读取该版本全份因子约束分配表，核对每个实验的因子层是否完整。
+
+    必须声明在 /{entry_id} 之前，否则 "factor_layer_check" 会被当成 entry_id 解析。
+    """
+    return service.check_factor_layers(version)
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条指标定义明细；不存在时给出可读的错误说明。"""

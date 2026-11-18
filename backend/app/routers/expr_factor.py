@@ -16,6 +16,7 @@ service = ExprFactorService()
 
 LIST_FIELDS = ["因子编号", "因子名称", "因子层级", "取值集合", "分配比例", "互斥规则", "关联实验", "生效批次"]
 STATUSES = ["草稿", "待校验", "已生效", "已停用"]
+ALLOC_FILTER_FIELDS = ["分配编号", "口径版本", "关联实验", "因子编号", "因子名称", "组合状态"]
 
 
 def query_filters(request: Request) -> dict[str, str]:
@@ -24,6 +25,15 @@ def query_filters(request: Request) -> dict[str, str]:
         key: value.strip()
         for key, value in request.query_params.items()
         if key in LIST_FIELDS and value.strip()
+    }
+
+
+def alloc_filters(request: Request) -> dict[str, str]:
+    """分配表筛选只接受分配表字段，避免把分页参数当成过滤条件。"""
+    return {
+        key: value.strip()
+        for key, value in request.query_params.items()
+        if key in ALLOC_FILTER_FIELDS and value.strip()
     }
 
 
@@ -63,6 +73,47 @@ def export_entries(
     return StreamingResponse(
         iter([output.getvalue()]), media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="expr_factor.csv"'})
+
+
+@router.post("/allocation/generate")
+def generate_allocation(payload: dict[str, object]) -> dict:
+    """生成因子约束分配表：校验互斥与空值边界后落库；中断可重试或续跑。
+
+    必须声明在 /{entry_id} 之前，否则 "allocation" 会被当成 entry_id 解析。
+    """
+    version = str(payload.get("口径版本") or payload.get("version") or "").strip() or "V027"
+    experiment = str(payload.get("关联实验") or "").strip() or None
+    mode = str(payload.get("模式") or "").strip()
+    resume = mode == "续跑" or bool(payload.get("resume"))
+    result, message = service.generate_allocation(
+        version=version, experiment_code=experiment, resume=resume)
+    return {"ok": not result.get("interrupted"), "message": message, "result": result}
+
+
+@router.get("/allocation")
+def list_allocation(
+    request: Request,
+    keyword: str | None = Query(default=None, description="按分配编号或因子编号检索"),
+    status: str | None = Query(default=None, description="组合状态：有效、已拒绝"),
+    version: str | None = Query(default=None, description="口径版本，如 V027"),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=200),
+) -> dict:
+    """分配表列表入口；空态时附一句暂无说明，和详情面板读同一张表。"""
+    items, total = service.list_allocation(
+        filters=alloc_filters(request), keyword=keyword, status=status,
+        version=version, page=page, size=size)
+    message = "" if items else "暂无因子约束分配数据，可先点击「生成分配表」创建"
+    return {"items": items, "total": total, "page": page, "size": size, "message": message}
+
+
+@router.get("/allocation/{alloc_id}")
+def get_allocation(alloc_id: int) -> dict:
+    """分配表详情：与列表入口同一份数据，保证列表与详情对得上。"""
+    entry = service.get_allocation(alloc_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"分配组合 {alloc_id} 不存在或已归档")
+    return entry
 
 
 @router.get("/{entry_id}", response_model=dict)

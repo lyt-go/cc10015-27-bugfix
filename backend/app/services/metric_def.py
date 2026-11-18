@@ -6,11 +6,13 @@ from typing import Any
 from app.store import store
 
 MODULE = "metric_def"
+ALLOC_MODULE = "factor_alloc"
 LIST_FIELDS = ["指标编号", "指标名称", "计算公式", "统计粒度", "时间窗口", "基准取值", "精度位数", "口径版本"]
 REQUIRED_FIELDS = ["指标编号", "指标名称", "计算公式"]
 STATUS_ORDER = ["草稿", "待校验", "已生效", "已废弃"]
 ACTION_RULES = {"提交校验": "待校验", "标记生效": "已生效", "标记废弃": "已废弃"}
 NEGATIVE_ACTIONS = []
+DEFAULT_CHECK_VERSION = "V027"
 
 
 class MetricDefService:
@@ -63,3 +65,48 @@ class MetricDefService:
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
         return entry, f"指标定义已{action}"
+
+    def check_factor_layers(self, version: str = DEFAULT_CHECK_VERSION) -> dict[str, Any]:
+        """跨模块联动：读取全份该版本的因子约束分配表，核对每个实验的因子层是否完整。
+
+        指标口径直接从分配表行里取（生成时已随行落库），不重新推导，
+        保证指标定义看到的就是消费链路实际使用的口径。
+        """
+        version = (version or "").strip() or DEFAULT_CHECK_VERSION
+        rows = [row for row in store.rows(ALLOC_MODULE) if row.get("口径版本") == version]
+        if not rows:
+            return {
+                "version": version,
+                "experiments": [],
+                "complete": False,
+                "message": f"暂无{version}因子约束分配数据，请先在实验因子模块生成分配表",
+            }
+        by_experiment: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            by_experiment.setdefault(str(row.get("关联实验", "")), []).append(row)
+        experiments: list[dict[str, Any]] = []
+        complete = True
+        for code, items in by_experiment.items():
+            rejected = [item for item in items if item.get("组合状态") != "有效"]
+            missing_layers = sorted({
+                str(item.get("因子编号", ""))
+                for item in items
+                if not str(item.get("因子层级") or "").strip()
+            })
+            calib = next(
+                (str(item.get("指标口径") or "") for item in items if str(item.get("指标口径") or "").strip()),
+                "",
+            )
+            exp_complete = not rejected and not missing_layers
+            complete = complete and exp_complete
+            experiments.append({
+                "关联实验": code,
+                "组合数": len(items),
+                "有效组合": len(items) - len(rejected),
+                "已拒绝": len(rejected),
+                "缺失层级因子": missing_layers,
+                "指标口径": calib,
+                "完整": exp_complete,
+            })
+        message = "全部实验因子层完整" if complete else "存在因子层缺失或被拒绝的组合，请回到实验因子模块处理"
+        return {"version": version, "experiments": experiments, "complete": complete, "message": message}
